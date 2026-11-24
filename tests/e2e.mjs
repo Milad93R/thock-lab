@@ -2334,7 +2334,7 @@ async function suiteDesk(browser) {
     await compact.ctx.close();
   }
 
-  // Compact landscape Desk framing check (844x390)
+  // Compact landscape Desk framing checks (844x390 + narrow 740x360 & 640x360 rotation with focused pad)
   const land = await open(browser, mobileOptions(844, 390), `${label}-landscape844`);
   try {
     await land.page.getByTestId('settings-btn').tap();
@@ -2359,6 +2359,59 @@ async function suiteDesk(browser) {
     assert(!land.errors.length, land.errors.join('\n'));
   } finally {
     await land.ctx.close();
+  }
+
+  // Narrow landscape rotation checks (360x740 -> 740x360 and 640x360 with pad focused, QA11 polish)
+  const narrowLand = await open(browser, mobileOptions(360, 740), `${label}-narrow-landscape`);
+  try {
+    await narrowLand.page.getByTestId('settings-btn').tap();
+    await narrowLand.page.getByTestId('settings-desk-btn').tap();
+    await narrowLand.page.getByTestId('desk-board').waitFor();
+    const pad = narrowLand.page.getByLabel('Type here');
+    await pad.tap();
+    await pad.fill('desk rotation');
+    for (const [w, h] of [[740, 360], [640, 360]]) {
+      await narrowLand.page.setViewportSize({ width: w, height: h });
+      await narrowLand.page.evaluate(() => {
+        const view = document.querySelector('[data-testid="desk-view"]');
+        if (view) view.scrollTop = 0;
+        document.querySelector('#desk-pad')?.focus({ preventScroll: true });
+      });
+      await narrowLand.page.waitForTimeout(120);
+      await shot(narrowLand.page, `desk-polish3-${ENGINE}-${w}x${h}`);
+      const check = await narrowLand.page.evaluate(() => {
+        const board = document.querySelector('[data-testid="desk-board"]')?.getBoundingClientRect();
+        const paper = document.querySelector('.desk-paper')?.getBoundingClientRect();
+        const field = document.querySelector('#desk-pad')?.getBoundingClientRect();
+        const status = document.querySelector('.desk-status')?.getBoundingClientRect();
+        if (!board || !paper || !field || board.height <= 0) return { ratio: 0 };
+        const visible = Math.max(0, Math.min(board.bottom, window.innerHeight) - Math.max(board.top, 0));
+        return {
+          boardTop: Math.round(board.top),
+          boardBottom: Math.round(board.bottom),
+          boardRight: Math.round(board.right),
+          paperTop: Math.round(paper.top),
+          paperLeft: Math.round(paper.left),
+          paperBottom: Math.round(paper.bottom),
+          fieldBottom: Math.round(field.bottom),
+          statusBottom: status ? Math.round(status.bottom) : 0,
+          ratio: +(visible / board.height).toFixed(3),
+          vh: window.innerHeight,
+          padValue: document.querySelector('#desk-pad')?.value,
+          padFocused: document.activeElement?.id === 'desk-pad',
+        };
+      });
+      assert(check.ratio >= 0.95 && check.boardBottom <= check.vh,
+        `Narrow landscape ${w}x${h} Desk must show keyboard on entry: ${JSON.stringify(check)}`);
+      assert(check.boardRight <= check.paperLeft + 2 && Math.abs(check.boardTop - check.paperTop) < 40,
+        `Narrow landscape ${w}x${h} Desk must place board (col 1) beside paper (col 2): ${JSON.stringify(check)}`);
+      assert(check.fieldBottom <= check.vh + 4 && check.padValue === 'desk rotation' && check.padFocused,
+        `Narrow landscape ${w}x${h} Desk must keep focused pad visible with text: ${JSON.stringify(check)}`);
+      await assertNoOverflow(narrowLand.page, `${label}-${w}x${h}`);
+    }
+    assert(!narrowLand.errors.length, narrowLand.errors.join('\n'));
+  } finally {
+    await narrowLand.ctx.close();
   }
 }
 

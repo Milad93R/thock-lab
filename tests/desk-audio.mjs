@@ -41,15 +41,15 @@ const AUDIO_TAP_INIT = `(() => {
     overFullScale: 0,
     maxPeak: 0,
     activeSamples: 0,
-    masterGain: null,
-    limiter: null,
-    ceilingDrives: [],
-    ceilingShapers: [],
     audio: null,
     sampleRate: 0,
     rafId: 0,
     lastReadTime: 0,
     voiceGains: [],
+    edges: new Map(),
+    destInputs: [],
+    compressors: [],
+    destTapSum: null,
     resetWindow() {
       this.maxPeak = 0;
       this.overFullScale = 0;
@@ -73,6 +73,18 @@ const AUDIO_TAP_INIT = `(() => {
       }
       this.lastReadTime = now;
     },
+    traceFrom(node) {
+      const chain = [];
+      const seen = new Set();
+      let cur = node;
+      while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        chain.push(cur);
+        const outs = this.edges.get(cur) || [];
+        cur = outs.find((n) => n !== this.destTapSum && !(n instanceof AnalyserNode));
+      }
+      return chain;
+    },
   };
 
   const render = OfflineAudioContext.prototype.startRendering;
@@ -89,24 +101,11 @@ const AUDIO_TAP_INIT = `(() => {
 
   const AC = window.AudioContext || window.webkitAudioContext;
   if (AC) {
-    const createGain = AC.prototype.createGain;
-    AC.prototype.createGain = function () {
-      const g = createGain.apply(this, arguments);
-      if (!probe.masterGain) probe.masterGain = g;
-      else if (probe.limiter && probe.ceilingDrives.length < 2) probe.ceilingDrives.push(g);
-      return g;
-    };
     const createComp = AC.prototype.createDynamicsCompressor;
     AC.prototype.createDynamicsCompressor = function () {
       const c = createComp.apply(this, arguments);
-      if (!probe.limiter) probe.limiter = c;
+      probe.compressors.push(c);
       return c;
-    };
-    const createShaper = AC.prototype.createWaveShaper;
-    AC.prototype.createWaveShaper = function () {
-      const s = createShaper.apply(this, arguments);
-      if (probe.limiter && probe.ceilingShapers.length < 2) probe.ceilingShapers.push(s);
-      return s;
     };
   }
 
@@ -117,20 +116,34 @@ const AUDIO_TAP_INIT = `(() => {
       sourceGainMap.set(this, target);
     }
     const audio = this.context;
+    if (!(audio instanceof OfflineAudioContext) && target instanceof AudioNode) {
+      let list = probe.edges.get(this);
+      if (!list) { list = []; probe.edges.set(this, list); }
+      if (!list.includes(target)) list.push(target);
+    }
     if (target === audio.destination && !(audio instanceof OfflineAudioContext)) {
-      const analyser = audio.createAnalyser();
-      analyser.fftSize = 32768;
-      connect.call(this, analyser);
-      probe.analyser = analyser;
-      probe.buf = new Float32Array(analyser.fftSize);
-      probe.audio = audio;
-      probe.sampleRate = audio.sampleRate;
-      probe.lastReadTime = audio.currentTime;
-      const tick = () => {
-        probe.flush();
-        probe.rafId = requestAnimationFrame(tick);
-      };
-      if (!probe.rafId) probe.rafId = requestAnimationFrame(tick);
+      if (!probe.destTapSum) {
+        const sum = audio.createGain();
+        sum.gain.value = 1;
+        const analyser = audio.createAnalyser();
+        analyser.fftSize = 32768;
+        connect.call(sum, analyser);
+        probe.destTapSum = sum;
+        probe.analyser = analyser;
+        probe.buf = new Float32Array(analyser.fftSize);
+        probe.audio = audio;
+        probe.sampleRate = audio.sampleRate;
+        probe.lastReadTime = audio.currentTime;
+        const tick = () => {
+          probe.flush();
+          probe.rafId = requestAnimationFrame(tick);
+        };
+        if (!probe.rafId) probe.rafId = requestAnimationFrame(tick);
+      }
+      if (!probe.destInputs.includes(this)) {
+        probe.destInputs.push(this);
+        connect.call(this, probe.destTapSum);
+      }
     }
     return connect.call(this, target, ...args);
   };
@@ -190,7 +203,71 @@ async function runStudioBaselineCheck(page) {
     peaks.push(res.maxPeak);
   }
   peaks.sort((a, b) => a - b);
-  return { medianPeak: peaks[2], peaks };
+
+  // Measure Studio post-compressor path topology & added latency (must be 0 nodes / 0.00 ms, pre-Desk-fix-1 graph)
+  const studioLatency = await page.evaluate(async () => {
+    const p = window.__deskClipProbe;
+    const studioComp = p.compressors[0];
+    if (!studioComp) throw new Error('missing Studio compressor');
+    const chain = p.traceFrom(studioComp);
+    const postNodes = chain.slice(1, -1); // nodes strictly between compressor and destination
+    const feedsDestinationDirectly = chain.length === 2 && chain[1] === p.audio.destination;
+    const sr = p.sampleRate || 48000;
+    // Replay the exact post-compressor chain (if any) on an impulse to measure added latency in samples & ms
+    const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const runImp = async (withPost) => {
+      const ctx = new OfflineCtx(1, sr, sr);
+      const imp = ctx.createBuffer(1, 256, sr);
+      imp.getChannelData(0)[0] = 0.25;
+      const src = ctx.createBufferSource();
+      src.buffer = imp;
+      const lim = ctx.createDynamicsCompressor();
+      lim.threshold.value = studioComp.threshold.value;
+      lim.knee.value = studioComp.knee.value;
+      lim.ratio.value = studioComp.ratio.value;
+      lim.attack.value = studioComp.attack.value;
+      lim.release.value = studioComp.release.value;
+      src.connect(lim);
+      let tail = lim;
+      if (withPost) {
+        for (const n of postNodes) {
+          if (n instanceof GainNode) {
+            const g = ctx.createGain(); g.gain.value = n.gain.value;
+            tail.connect(g); tail = g;
+          } else if (n instanceof WaveShaperNode) {
+            const s = ctx.createWaveShaper(); s.curve = n.curve; s.oversample = n.oversample;
+            tail.connect(s); tail = s;
+          }
+        }
+      }
+      tail.connect(ctx.destination);
+      src.start(0.25);
+      const out = (await ctx.startRendering()).getChannelData(0);
+      let idx = 0, mx = 0;
+      for (let i = 0; i < out.length; i++) {
+        const a = Math.abs(out[i]);
+        if (a > mx) { mx = a; idx = i; }
+      }
+      return idx;
+    };
+    const baseIdx = await runImp(false);
+    const actualIdx = await runImp(true);
+    const addedSamples = actualIdx - baseIdx;
+    return {
+      sampleRate: sr,
+      feedsDestinationDirectly,
+      postNodeTypes: postNodes.map((n) => n.constructor.name),
+      addedSamples,
+      addedMs: +(addedSamples / sr * 1000).toFixed(3),
+      compressorCountBeforeDesk: p.compressors.length,
+    };
+  });
+  assert(studioLatency.feedsDestinationDirectly && studioLatency.postNodeTypes.length === 0,
+    `[${ENGINE} studio] compressor must feed destination directly without Desk ceiling: ${JSON.stringify(studioLatency)}`);
+  assert(studioLatency.addedSamples === 0,
+    `[${ENGINE} studio] expected 0 added latency samples after compressor, got ${JSON.stringify(studioLatency)}`);
+
+  return { medianPeak: peaks[2], peaks, latency: studioLatency };
 }
 
 async function runLivePeakTests(page, volumePct, labelSuffix = '') {
@@ -285,25 +362,84 @@ async function runLivePeakTests(page, volumePct, labelSuffix = '') {
 }
 
 async function runOfflineTruePeakAndCadenceSuite(page) {
-  // Inspect live deployed graph nodes so offline replay uses the exact deployed DSP chain!
-  const liveGraph = await page.evaluate(() => {
+  // Inspect live deployed Desk bus nodes by walking the actual connection graph from the Desk compressor
+  const liveGraph = await page.evaluate(async () => {
     const p = window.__deskClipProbe;
+    const deskComp = p.compressors.find((c) => {
+      const chain = p.traceFrom(c);
+      return chain.some((n) => n instanceof WaveShaperNode);
+    });
+    if (!deskComp) return { stages: [], limiter: null, deskAddedSamples: null, deskAddedMs: null, studioStillDirect: false };
+    const studioComp = p.compressors.find((c) => c !== deskComp);
+    const studioChain = studioComp ? p.traceFrom(studioComp) : [];
+    const studioStillDirect = studioChain.length === 2 && studioChain[1] === p.audio.destination;
+    const chain = p.traceFrom(deskComp);
+    const stages = [];
+    for (let i = 1; i < chain.length - 1; i++) {
+      if (chain[i] instanceof GainNode && chain[i + 1] instanceof WaveShaperNode) {
+        stages.push({
+          driveNode: chain[i],
+          shaperNode: chain[i + 1],
+          oversample: chain[i + 1].oversample,
+          curveLen: chain[i + 1].curve?.length ?? 0,
+          drive: chain[i].gain.value,
+        });
+      }
+    }
+    p.deskLimiter = deskComp;
+    p.deskStages = stages;
+
+    const sr = p.sampleRate || 48000;
+    const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const runImp = async (withCeiling) => {
+      const ctx = new OfflineCtx(1, sr, sr);
+      const imp = ctx.createBuffer(1, 256, sr);
+      imp.getChannelData(0)[0] = 0.25;
+      const src = ctx.createBufferSource();
+      src.buffer = imp;
+      const lim = ctx.createDynamicsCompressor();
+      lim.threshold.value = deskComp.threshold.value;
+      lim.knee.value = deskComp.knee.value;
+      lim.ratio.value = deskComp.ratio.value;
+      lim.attack.value = deskComp.attack.value;
+      lim.release.value = deskComp.release.value;
+      src.connect(lim);
+      let tail = lim;
+      if (withCeiling) {
+        for (const st of stages) {
+          const d = ctx.createGain(); d.gain.value = st.drive;
+          const s = ctx.createWaveShaper(); s.curve = st.shaperNode.curve; s.oversample = st.oversample;
+          tail.connect(d); d.connect(s); tail = s;
+        }
+      }
+      tail.connect(ctx.destination);
+      src.start(0.25);
+      const out = (await ctx.startRendering()).getChannelData(0);
+      let idx = 0, mx = 0;
+      for (let i = 0; i < out.length; i++) {
+        const a = Math.abs(out[i]);
+        if (a > mx) { mx = a; idx = i; }
+      }
+      return idx;
+    };
+    const deskAddedSamples = (await runImp(true)) - (await runImp(false));
     return {
-      stages: p.ceilingShapers.map((s, i) => ({
-        oversample: s.oversample,
-        curveLen: s.curve?.length ?? 0,
-        drive: p.ceilingDrives[i]?.gain?.value ?? null,
-      })),
-      limiter: p.limiter ? {
-        threshold: p.limiter.threshold.value,
-        knee: p.limiter.knee.value,
-        ratio: p.limiter.ratio.value,
-        attack: p.limiter.attack.value,
-        release: p.limiter.release.value,
-      } : null,
+      studioStillDirect,
+      sampleRate: sr,
+      deskAddedSamples,
+      deskAddedMs: +(deskAddedSamples / sr * 1000).toFixed(2),
+      stages: stages.map(({ oversample, curveLen, drive }) => ({ oversample, curveLen, drive })),
+      limiter: {
+        threshold: deskComp.threshold.value,
+        knee: deskComp.knee.value,
+        ratio: deskComp.ratio.value,
+        attack: deskComp.attack.value,
+        release: deskComp.release.value,
+      },
     };
   });
-  assert(liveGraph.stages.length === 2, `[${ENGINE}] expected 2 oversampled ceiling stages, got ${JSON.stringify(liveGraph.stages)}`);
+  assert(liveGraph.studioStillDirect, `[${ENGINE}] Studio path must stay direct to destination after Desk bus is created`);
+  assert(liveGraph.stages.length === 2, `[${ENGINE}] expected 2 oversampled Desk ceiling stages, got ${JSON.stringify(liveGraph.stages)}`);
   for (const st of liveGraph.stages) {
     assert(st.oversample === '4x' && st.curveLen === 4097 && st.drive === 0.25, `[${ENGINE}] invalid ceiling stage: ${JSON.stringify(st)}`);
   }
@@ -367,12 +503,12 @@ async function runOfflineTruePeakAndCadenceSuite(page) {
       const probe = window.__deskClipProbe;
       const buf = probe.lastPlayedBuffer || probe.lastBuffer;
       if (!buf) throw new Error('missing rendered Desk buffer');
-      const liveStages = probe.ceilingShapers.map((s, i) => ({
-        curve: s.curve,
-        oversample: s.oversample,
-        drive: probe.ceilingDrives[i].gain.value,
+      const liveStages = probe.deskStages.map((st) => ({
+        curve: st.shaperNode.curve,
+        oversample: st.oversample,
+        drive: st.drive,
       }));
-      const lim = probe.limiter;
+      const lim = probe.deskLimiter;
 
       function connectMasterChain(offline, master) {
         const limiter = offline.createDynamicsCompressor();
@@ -658,7 +794,9 @@ async function runOfflineTruePeakAndCadenceSuite(page) {
         const impOut = (await impCtx.startRendering()).getChannelData(0);
         let impPeakIdx = 0;
         let impPeakVal = 0;
+        let impNaNs = 0;
         for (let i = 0; i < impOut.length; i++) {
+          if (Number.isNaN(impOut[i])) { impNaNs++; continue; }
           const a = Math.abs(impOut[i]);
           if (a > impPeakVal) { impPeakVal = a; impPeakIdx = i; }
         }
@@ -724,10 +862,16 @@ async function runOfflineTruePeakAndCadenceSuite(page) {
         const b100Last = diffRms(b100_10.out, b100_9.out, stLast, win10);
 
         cadence = {
+          impPeakIdx,
+          impPeakVal,
+          impNaNs,
+          latencySamples,
           latencyMs: +(latencySamples / sr * 1000).toFixed(2),
           spacingDropsDb,
           spacingScales,
           crossSpacingSpreadDb,
+          minFirst10: Math.min(...allFirst10Rms),
+          maxFirst10: Math.max(...allFirst10Rms),
           burstMinScale: Math.min(...b100_10.scales),
           burstLastScaleDb: 20 * Math.log10(b100_10.scales[9] / b100_10.scales[0]),
           burst85AttackDiffDb: 20 * Math.log10(b85Last / b85First),
@@ -794,9 +938,9 @@ try {
   page.setDefaultTimeout(20000);
   await page.goto(BASE_URL + '/', { waitUntil: 'load' });
 
-  // 1) Verify Studio default build single-stroke peak at 85% matches pre-Desk-fix-1
+  // 1) Verify Studio default build single-stroke peak at 85% matches pre-Desk-fix-1 & adds 0 latency
   const studio = await runStudioBaselineCheck(page);
-  console.log(`  Studio 85% (${ENGINE}): medianPeak=${studio.medianPeak.toFixed(4)} (trials: ${studio.peaks.map((v) => v.toFixed(3)).join(', ')})`);
+  console.log(`  Studio 85% (${ENGINE} @ ${studio.latency.sampleRate} Hz): medianPeak=${studio.medianPeak.toFixed(4)}, addedLatency=${studio.latency.addedSamples} smp (${studio.latency.addedMs.toFixed(2)} ms), direct=${studio.latency.feedsDestinationDirectly} (trials: ${studio.peaks.map((v) => v.toFixed(3)).join(', ')})`);
 
   // 2) Enter Desk mode and run live peak tests on Deep Thock / Walnut + Clicky / Aluminum
   await page.getByTestId('mode-desk-btn').click();
@@ -813,7 +957,8 @@ try {
   const liveClicky100 = await runLivePeakTests(page, 100, ' clicky/aluminum');
 
   // 3) Run comprehensive offline 24-preset x 2 sample rates x 2 volumes true-peak + cadence suite
-  const { results, spreadDb } = await runOfflineTruePeakAndCadenceSuite(page);
+  const { liveGraph, results, spreadDb } = await runOfflineTruePeakAndCadenceSuite(page);
+  console.log(`  Desk ceiling path (${ENGINE} @ ${liveGraph.sampleRate} Hz): addedLatency=${liveGraph.deskAddedSamples} smp (${liveGraph.deskAddedMs.toFixed(2)} ms), studioStillDirect=${liveGraph.studioStillDirect}`);
 
   let maxSamplePeak = 0;
   let maxTp4 = 0;

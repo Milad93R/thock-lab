@@ -126,6 +126,7 @@ export class DeskHeadroomTracker {
 class ThockAudioEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
+  private deskGain: GainNode | null = null;
   private volume = 0.85;
   private muted = false;
   private broken = false;
@@ -143,6 +144,7 @@ class ThockAudioEngine {
     try {
       if (!this.ctx) {
         const ctx = new AudioCtx({ latencyHint: 'interactive' });
+        // Original low-latency Studio path (pre-Desk-fix-1 graph, zero added latency).
         const master = ctx.createGain();
         master.gain.setValueAtTime(this.targetGain(), ctx.currentTime);
         const limiter = ctx.createDynamicsCompressor();
@@ -151,22 +153,8 @@ class ThockAudioEngine {
         limiter.ratio.value = 10;
         limiter.attack.value = 0.001;
         limiter.release.value = 0.05;
-        const ceilingDrive1 = ctx.createGain();
-        ceilingDrive1.gain.value = 1 / CEILING_RANGE;
-        const ceiling1 = ctx.createWaveShaper();
-        ceiling1.curve = getTruePeakCeilingCurve(1);
-        ceiling1.oversample = CEILING_OVERSAMPLE;
-        const ceilingDrive2 = ctx.createGain();
-        ceilingDrive2.gain.value = 1 / CEILING_RANGE;
-        const ceiling2 = ctx.createWaveShaper();
-        ceiling2.curve = getTruePeakCeilingCurve(2);
-        ceiling2.oversample = CEILING_OVERSAMPLE;
         master.connect(limiter);
-        limiter.connect(ceilingDrive1);
-        ceilingDrive1.connect(ceiling1);
-        ceiling1.connect(ceilingDrive2);
-        ceilingDrive2.connect(ceiling2);
-        ceiling2.connect(ctx.destination);
+        limiter.connect(ctx.destination);
         getNoiseBuffer(ctx);
         this.ctx = ctx;
         this.masterGain = master;
@@ -181,6 +169,47 @@ class ThockAudioEngine {
     } catch {
       this.broken = true;
       this.pending = [];
+    }
+  }
+
+  /** Lazily attaches the Desk-only true-peak ceiling bus so Studio stays zero-added-latency. */
+  private ensureDeskBus(ctx: AudioContext): GainNode {
+    if (this.deskGain) return this.deskGain;
+    const deskGain = ctx.createGain();
+    deskGain.gain.setValueAtTime(this.targetGain(), ctx.currentTime);
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -3;
+    limiter.knee.value = 6;
+    limiter.ratio.value = 10;
+    limiter.attack.value = 0.001;
+    limiter.release.value = 0.05;
+    const ceilingDrive1 = ctx.createGain();
+    ceilingDrive1.gain.value = 1 / CEILING_RANGE;
+    const ceiling1 = ctx.createWaveShaper();
+    ceiling1.curve = getTruePeakCeilingCurve(1);
+    ceiling1.oversample = CEILING_OVERSAMPLE;
+    const ceilingDrive2 = ctx.createGain();
+    ceilingDrive2.gain.value = 1 / CEILING_RANGE;
+    const ceiling2 = ctx.createWaveShaper();
+    ceiling2.curve = getTruePeakCeilingCurve(2);
+    ceiling2.oversample = CEILING_OVERSAMPLE;
+    deskGain.connect(limiter);
+    limiter.connect(ceilingDrive1);
+    ceilingDrive1.connect(ceiling1);
+    ceiling1.connect(ceilingDrive2);
+    ceilingDrive2.connect(ceiling2);
+    ceiling2.connect(ctx.destination);
+    this.deskGain = deskGain;
+    return deskGain;
+  }
+
+  /** Pre-warms the Desk bus when entering Desk mode if the AudioContext is already live. */
+  public prepareDesk(): void {
+    if (this.broken || !this.ctx || this.ctx.state === 'closed') return;
+    try {
+      this.ensureDeskBus(this.ctx);
+    } catch {
+      // Desk bus will retry on first stroke if the device is temporarily unavailable.
     }
   }
 
@@ -200,11 +229,18 @@ class ThockAudioEngine {
   }
 
   private applyGain(): void {
-    if (!this.masterGain || !this.ctx) return;
+    if (!this.ctx) return;
     try {
       const now = this.ctx.currentTime;
-      this.masterGain.gain.cancelScheduledValues(now);
-      this.masterGain.gain.setTargetAtTime(this.targetGain(), now, 0.012);
+      const target = this.targetGain();
+      if (this.masterGain) {
+        this.masterGain.gain.cancelScheduledValues(now);
+        this.masterGain.gain.setTargetAtTime(target, now, 0.012);
+      }
+      if (this.deskGain) {
+        this.deskGain.gain.cancelScheduledValues(now);
+        this.deskGain.gain.setTargetAtTime(target, now, 0.012);
+      }
     } catch {
       // The audio device can become unavailable while the studio is open.
     }
@@ -272,7 +308,7 @@ class ThockAudioEngine {
 
     const play = (phase: 'down' | 'up') => {
       const ctx = this.ctx!;
-      const master = this.masterGain!;
+      const deskBus = this.ensureDeskBus(ctx);
       const earliest = () => phase === 'down'
         ? ctx.currentTime
         : Math.max(ctx.currentTime, downTime! + 0.012);
@@ -283,7 +319,7 @@ class ThockAudioEngine {
         source.buffer = sample.buffer;
         source.playbackRate.value = touch.rate;
         source.connect(gain);
-        gain.connect(master);
+        gain.connect(deskBus);
         source.onended = () => gain.disconnect();
         const time = earliest();
         const env = phase === 'down' ? sample.envDown : sample.envUp;
@@ -300,7 +336,7 @@ class ThockAudioEngine {
       const time = earliest();
       const scale = this.deskHeadroom.allocate(time, touch.rate, touch.gain, null, FALLBACK_ATTACK_RMS);
       const voiceGain = touch.gain * scale * deskFallbackTrim(type, build.baseMaterial);
-      const start = prepareSwitchStroke(ctx, master, type, {
+      const start = prepareSwitchStroke(ctx, deskBus, type, {
         phase, baseMaterial: build.baseMaterial, dailyVariant: daily,
         pitch: touch.rate, velocity: voiceGain,
       });

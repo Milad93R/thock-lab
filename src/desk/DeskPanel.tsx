@@ -43,7 +43,10 @@ export function DeskPanel({
   const buildRef = useRef(build);
   buildRef.current = build;
 
-  useEffect(() => { deskSamples(build); }, [build]);
+  useEffect(() => {
+    audioEngine.prepareDesk();
+    deskSamples(build);
+  }, [build]);
 
   useEffect(() => {
     if (!window.matchMedia('(pointer: coarse)').matches) {
