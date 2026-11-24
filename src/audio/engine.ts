@@ -1,36 +1,126 @@
 import { ClickerBuild, getDailyVariant } from '../types/build';
-import { deskFallbackTrim, deskSamples, DESK_PHASE_SECONDS } from './deskSamples';
+import {
+  deskFallbackTrim,
+  deskSamples,
+  DESK_PHASE_SECONDS,
+  samplePhaseEnvelope,
+} from './deskSamples';
 import { getNoiseBuffer, playMilestoneChime, prepareSwitchStroke } from './recipes';
 
 const SCHEDULE_AHEAD = 0.024;
 const MIN_STROKE_GAP = 0.045;
-const DESK_OVERLAP_WINDOW = 0.085;
 
-// True peak safety ceiling after the dynamics limiter.
-// Linear 1:1 up to CEILING_KNEE so single-stroke attacks stay transparent,
-// then smoothly saturates asymptotically toward CEILING_MAX (< 0.98).
-const CEILING_RANGE = 4.0;
-const CEILING_KNEE = 0.78;
-const CEILING_MAX = 0.95;
+// Two-stage 4x-oversampled true-peak safety ceiling after the Studio-matched limiter.
+// Both stages are linear 1:1 up to CEILING_KNEE (above Studio's 0.674 warm single-click
+// peak) so single Studio and Desk strokes pass untouched. Stage 1 gently absorbs large
+// multi-key sums; Stage 2 catches Stage 1's small 4x decimation-filter overshoot with
+// near-zero ringing, keeping reconstructed true-peak <= -1 dBTP (<= 0.89) across all
+// presets at 44.1 kHz and 48 kHz.
+export const CEILING_RANGE = 4.0;
+export const CEILING_KNEE = 0.675;
+export const CEILING_STAGE1_MAX = 0.82;
+export const CEILING_MAX = 0.775;
+export const CEILING_OVERSAMPLE: OverSampleType = '4x';
 
-let ceilingCurve: Float32Array<ArrayBuffer> | null = null;
-function getTruePeakCeilingCurve(): Float32Array<ArrayBuffer> {
-  if (!ceilingCurve) {
-    const length = 4097;
-    const half = (length - 1) / 2;
-    const span = CEILING_MAX - CEILING_KNEE;
-    ceilingCurve = new Float32Array(length);
-    for (let i = 0; i < length; i++) {
-      const x = ((i - half) / half) * CEILING_RANGE;
-      const abs = Math.abs(x);
-      if (abs <= CEILING_KNEE) {
-        ceilingCurve[i] = x;
-      } else {
-        ceilingCurve[i] = Math.sign(x) * (CEILING_KNEE + span * Math.tanh((abs - CEILING_KNEE) / span));
-      }
+// Gentle concurrent-energy headroom weight for Desk mode.
+// Scales a new voice only by the actual still-sounding RMS energy of active voices
+// (smoothly restoring to 1.0 as older attacks decay; zero hard window edges).
+export const DESK_HEADROOM_WEIGHT = 0.32;
+const FALLBACK_ATTACK_RMS = 0.26;
+const FALLBACK_DECAY_TAU = 0.014;
+const MAX_TRACKED_VOICES = 24;
+
+function buildCeilingCurve(ceilingMax: number): Float32Array<ArrayBuffer> {
+  const length = 4097;
+  const half = (length - 1) / 2;
+  const span = ceilingMax - CEILING_KNEE;
+  const curve = new Float32Array(length);
+  for (let i = 0; i < length; i++) {
+    const x = ((i - half) / half) * CEILING_RANGE;
+    const abs = Math.abs(x);
+    if (abs <= CEILING_KNEE) {
+      curve[i] = x;
+    } else {
+      const u = (abs - CEILING_KNEE) / span;
+      curve[i] = Math.sign(x) * (CEILING_KNEE + span * (u / (1 + u)));
     }
   }
-  return ceilingCurve;
+  return curve;
+}
+
+let ceilingCurveStage1: Float32Array<ArrayBuffer> | null = null;
+let ceilingCurveStage2: Float32Array<ArrayBuffer> | null = null;
+export function getTruePeakCeilingCurve(stage: 1 | 2 = 2): Float32Array<ArrayBuffer> {
+  if (stage === 1) {
+    if (!ceilingCurveStage1) ceilingCurveStage1 = buildCeilingCurve(CEILING_STAGE1_MAX);
+    return ceilingCurveStage1;
+  }
+  if (!ceilingCurveStage2) ceilingCurveStage2 = buildCeilingCurve(CEILING_MAX);
+  return ceilingCurveStage2;
+}
+
+interface ActiveDeskVoice {
+  startTime: number;
+  rate: number;
+  gain: number;
+  env: Float32Array | null;
+  duration: number;
+}
+
+export class DeskHeadroomTracker {
+  private voices: ActiveDeskVoice[] = [];
+
+  public reset(): void {
+    this.voices.length = 0;
+  }
+
+  /**
+   * Computes a smooth headroom scale in (0, 1] from the actual concurrent signal
+   * energy still sounding at `time`, then records the new voice with its applied gain.
+   */
+  public allocate(
+    time: number,
+    rate: number,
+    nominalGain: number,
+    env: Float32Array | null,
+    downAttackRms: number
+  ): number {
+    let keep = 0;
+    let activePower = 0;
+
+    for (let i = 0; i < this.voices.length; i++) {
+      const voice = this.voices[i];
+      const elapsed = (time - voice.startTime) * voice.rate;
+      if (elapsed >= voice.duration || voice.startTime > time + 0.025) continue;
+      this.voices[keep++] = voice;
+      if (voice.startTime > time + 0.01) continue;
+
+      const offset = Math.max(0, elapsed);
+      const rms = voice.env
+        ? samplePhaseEnvelope(voice.env, offset)
+        : FALLBACK_ATTACK_RMS * Math.exp(-offset / FALLBACK_DECAY_TAU);
+      const amp = voice.gain * rms;
+      activePower += amp * amp;
+    }
+    this.voices.length = keep;
+
+    const attackRms = env
+      ? Math.max(env[0] ?? 0, downAttackRms, 1e-4)
+      : FALLBACK_ATTACK_RMS;
+    const refPower = Math.max((nominalGain * attackRms) ** 2, 1e-8);
+    const overlapRatio = activePower / refPower;
+    const scale = 1 / Math.sqrt(1 + DESK_HEADROOM_WEIGHT * overlapRatio);
+
+    this.voices.push({
+      startTime: time,
+      rate,
+      gain: nominalGain * scale,
+      env,
+      duration: DESK_PHASE_SECONDS,
+    });
+    if (this.voices.length > MAX_TRACKED_VOICES) this.voices.shift();
+    return scale;
+  }
 }
 
 class ThockAudioEngine {
@@ -41,8 +131,7 @@ class ThockAudioEngine {
   private broken = false;
   private clockCheck = 0;
   private pending: Array<() => void> = [];
-  private deskDownTimes: number[] = [];
-  private deskUpTimes: number[] = [];
+  private deskHeadroom = new DeskHeadroomTracker();
 
   /** Called synchronously from trusted input so the browser can start its audio device. */
   public activate(canResume: boolean): void {
@@ -57,20 +146,27 @@ class ThockAudioEngine {
         const master = ctx.createGain();
         master.gain.setValueAtTime(this.targetGain(), ctx.currentTime);
         const limiter = ctx.createDynamicsCompressor();
-        limiter.threshold.value = -4;
-        limiter.knee.value = 3;
-        limiter.ratio.value = 16;
+        limiter.threshold.value = -3;
+        limiter.knee.value = 6;
+        limiter.ratio.value = 10;
         limiter.attack.value = 0.001;
-        limiter.release.value = 0.045;
-        const ceilingDrive = ctx.createGain();
-        ceilingDrive.gain.value = 1 / CEILING_RANGE;
-        const ceiling = ctx.createWaveShaper();
-        ceiling.curve = getTruePeakCeilingCurve();
-        ceiling.oversample = 'none';
+        limiter.release.value = 0.05;
+        const ceilingDrive1 = ctx.createGain();
+        ceilingDrive1.gain.value = 1 / CEILING_RANGE;
+        const ceiling1 = ctx.createWaveShaper();
+        ceiling1.curve = getTruePeakCeilingCurve(1);
+        ceiling1.oversample = CEILING_OVERSAMPLE;
+        const ceilingDrive2 = ctx.createGain();
+        ceilingDrive2.gain.value = 1 / CEILING_RANGE;
+        const ceiling2 = ctx.createWaveShaper();
+        ceiling2.curve = getTruePeakCeilingCurve(2);
+        ceiling2.oversample = CEILING_OVERSAMPLE;
         master.connect(limiter);
-        limiter.connect(ceilingDrive);
-        ceilingDrive.connect(ceiling);
-        ceiling.connect(ctx.destination);
+        limiter.connect(ceilingDrive1);
+        ceilingDrive1.connect(ceiling1);
+        ceiling1.connect(ceilingDrive2);
+        ceilingDrive2.connect(ceiling2);
+        ceiling2.connect(ctx.destination);
         getNoiseBuffer(ctx);
         this.ctx = ctx;
         this.masterGain = master;
@@ -146,21 +242,6 @@ class ThockAudioEngine {
     this.flush();
   }
 
-  private deskVoiceScale(phase: 'down' | 'up', time: number): number {
-    const history = phase === 'down' ? this.deskDownTimes : this.deskUpTimes;
-    let keep = 0;
-    for (let i = 0; i < history.length; i++) {
-      if (time - history[i] <= DESK_OVERLAP_WINDOW && history[i] <= time + 0.02) {
-        history[keep++] = history[i];
-      }
-    }
-    history.length = keep;
-    const scale = 1 / Math.sqrt(1 + 0.55 * keep);
-    history.push(time);
-    if (history.length > 16) history.shift();
-    return scale;
-  }
-
   public triggerDown(build: ClickerBuild, velocity: number): () => void {
     const daily = getDailyVariant(build.dailyVariantId) ?? null;
     const type = daily?.baseSwitch ?? build.switchType;
@@ -185,7 +266,7 @@ class ThockAudioEngine {
   }
 
   public triggerDeskDown(build: ClickerBuild, touch: { rate: number; gain: number }): (released: boolean) => void {
-    const buffer = deskSamples(build);
+    const sample = deskSamples(build);
     let downTime: number | undefined;
     let cancelled = false;
 
@@ -196,16 +277,18 @@ class ThockAudioEngine {
         ? ctx.currentTime
         : Math.max(ctx.currentTime, downTime! + 0.012);
 
-      if (buffer) {
+      if (sample) {
         const source = ctx.createBufferSource();
         const gain = ctx.createGain();
-        source.buffer = buffer;
+        source.buffer = sample.buffer;
         source.playbackRate.value = touch.rate;
         source.connect(gain);
         gain.connect(master);
         source.onended = () => gain.disconnect();
         const time = earliest();
-        gain.gain.value = touch.gain * this.deskVoiceScale(phase, time);
+        const env = phase === 'down' ? sample.envDown : sample.envUp;
+        const scale = this.deskHeadroom.allocate(time, touch.rate, touch.gain, env, sample.downAttackRms);
+        gain.gain.value = touch.gain * scale;
         source.start(time, phase === 'down' ? 0 : DESK_PHASE_SECONDS, DESK_PHASE_SECONDS);
         return time;
       }
@@ -215,7 +298,8 @@ class ThockAudioEngine {
       const daily = getDailyVariant(build.dailyVariantId);
       const type = daily?.baseSwitch ?? build.switchType;
       const time = earliest();
-      const voiceGain = touch.gain * this.deskVoiceScale(phase, time) * deskFallbackTrim(type, build.baseMaterial);
+      const scale = this.deskHeadroom.allocate(time, touch.rate, touch.gain, null, FALLBACK_ATTACK_RMS);
+      const voiceGain = touch.gain * scale * deskFallbackTrim(type, build.baseMaterial);
       const start = prepareSwitchStroke(ctx, master, type, {
         phase, baseMaterial: build.baseMaterial, dailyVariant: daily,
         pitch: touch.rate, velocity: voiceGain,

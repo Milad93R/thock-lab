@@ -2309,24 +2309,56 @@ async function suiteDesk(browser) {
     await mobile.ctx.close();
   }
 
-  // Compact Desk first-screen keyboard visibility check (360x640)
+  // Compact Desk first-screen keyboard visibility & legibility check (360x640)
   const compact = await open(browser, mobileOptions(360, 640), `${label}-compact360`);
   try {
     await compact.page.getByTestId('settings-btn').tap();
     await compact.page.getByTestId('settings-desk-btn').tap();
     await compact.page.getByTestId('desk-board').waitFor();
-    await shot(compact.page, `desk-fix1-${ENGINE}-360x640`);
-    const boardVis = await compact.page.evaluate(() => {
+    await shot(compact.page, `desk-fix2-${ENGINE}-360x640`);
+    const boardCheck = await compact.page.evaluate(() => {
       const r = document.querySelector('[data-testid="desk-board"]')?.getBoundingClientRect();
-      if (!r || r.height <= 0) return { ratio: 0 };
+      const letterSize = parseFloat(getComputedStyle(document.querySelector('[data-code="KeyA"] span')).fontSize);
+      const multiSize = parseFloat(getComputedStyle(document.querySelector('[data-code="Escape"] span')).fontSize);
+      const pgUpCompact = getComputedStyle(document.querySelector('[data-code="PageUp"] .desk-legend-compact')).display;
+      if (!r || r.height <= 0) return { ratio: 0, letterSize, multiSize, pgUpCompact };
       const visible = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
-      return { top: r.top, bottom: r.bottom, height: r.height, visible, ratio: visible / r.height };
+      return { top: r.top, bottom: r.bottom, height: r.height, visible, ratio: visible / r.height, letterSize, multiSize, pgUpCompact };
     });
-    assert(boardVis.ratio >= 0.75, `Compact 360x640 Desk should show most of the keyboard on first screen: ${JSON.stringify(boardVis)}`);
+    assert(boardCheck.ratio >= 0.75, `Compact 360x640 Desk should show most of the keyboard on first screen: ${JSON.stringify(boardCheck)}`);
+    assert(boardCheck.letterSize >= 7.8 && boardCheck.multiSize >= 6.8 && boardCheck.pgUpCompact !== 'none',
+      `Compact Desk legends should stay legible and abbreviated: ${JSON.stringify(boardCheck)}`);
     await assertNoOverflow(compact.page, `${label}-compact360`);
     assert(!compact.errors.length, compact.errors.join('\n'));
   } finally {
     await compact.ctx.close();
+  }
+
+  // Compact landscape Desk framing check (844x390)
+  const land = await open(browser, mobileOptions(844, 390), `${label}-landscape844`);
+  try {
+    await land.page.getByTestId('settings-btn').tap();
+    await land.page.getByTestId('settings-desk-btn').tap();
+    await land.page.getByTestId('desk-board').waitFor();
+    await shot(land.page, `desk-fix2-${ENGINE}-844x390`);
+    const landCheck = await land.page.evaluate(() => {
+      const r = document.querySelector('[data-testid="desk-board"]')?.getBoundingClientRect();
+      const pad = document.querySelector('#desk-pad')?.getBoundingClientRect();
+      if (!r || r.height <= 0) return { ratio: 0 };
+      const visible = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+      return {
+        boardBottom: r.bottom,
+        ratio: visible / r.height,
+        padBottom: pad?.bottom ?? 9999,
+        vh: window.innerHeight,
+      };
+    });
+    assert(landCheck.ratio >= 0.9 && landCheck.padBottom <= landCheck.vh + 4,
+      `Landscape 844x390 Desk should frame board & pad on entry: ${JSON.stringify(landCheck)}`);
+    await assertNoOverflow(land.page, `${label}-landscape844`);
+    assert(!land.errors.length, land.errors.join('\n'));
+  } finally {
+    await land.ctx.close();
   }
 }
 
