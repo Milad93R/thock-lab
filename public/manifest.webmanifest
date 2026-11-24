@@ -1,0 +1,20 @@
+{
+  "name": "Thock Lab — build-your-own ASMR clicker",
+  "short_name": "Thock Lab",
+  "description": "Design a chunky 3D mechanical-key clicker, tap it for synthesized switch sounds, save it to your shelf and share it with a link. Works offline.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F7EDE4",
+  "theme_color": "#F7EDE4",
+  "categories": ["entertainment", "games", "music"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

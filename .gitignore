@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.vite/
+.cache/
+test-results/
+TASK*.md
+FIX*.md
+POLISH*.md
+CONTINUE*.md
+REDESIGN*.md
+SPEC.md
+REPORT.md
+qa/
+qa-review*/
+*.log
