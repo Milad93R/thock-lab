@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { flushSync } from 'react-dom';
 import { X } from 'lucide-react';
 import { audioEngine } from './audio/engine';
-import { DeskPanel } from './desk/DeskPanel';
+import { DeskPanel, type DeskListening } from './desk/DeskPanel';
 import { AchievementsModal } from './components/AchievementsModal';
 import { BottomBar } from './components/BottomBar';
 import { ClickerStage, ClickerStageHandle, RendererMode } from './components/ClickerStage';
@@ -137,6 +137,8 @@ export function App() {
 
   const [state, setState] = useState<PersistedState>(initial.state);
   const [mode, setMode] = useState<'play' | 'customize' | 'desk'>('play');
+  const [deskListening, setDeskListening] = useState<DeskListening>('pad');
+  const [deskText, setDeskText] = useState('');
   const modeRef = useRef(mode);
   modeRef.current = mode;
   const [activeTab, setActiveTab] = useState<CustomizeTab>('switch');
@@ -896,6 +898,10 @@ export function App() {
           build={state.currentBuild}
           dailySwitch={dailySwitch}
           muted={state.settings.muted}
+          listening={deskListening}
+          padText={deskText}
+          onChangeListening={setDeskListening}
+          onChangePadText={setDeskText}
           onChangeBuild={updateBuild}
           onClose={closeDesk}
         />
@@ -958,6 +964,7 @@ export function App() {
         open={activeDialog === 'settings'}
         settings={state.settings}
         renderer={renderer}
+        deskListening={mode === 'desk' ? deskListening : null}
         onUpdateSettings={handleUpdateSettings}
         onResetCamera={() => stageRef.current?.resetCamera()}
         onReplayHints={() => {

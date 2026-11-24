@@ -6,6 +6,7 @@ interface SettingsModalProps {
   open: boolean;
   settings: UserSettings;
   renderer: '3d' | '2d';
+  deskListening?: 'pad' | 'tab' | null;
   onUpdateSettings: (patch: Partial<UserSettings>) => void;
   onResetCamera: () => void;
   onReplayHints: () => void;
@@ -17,6 +18,7 @@ export function SettingsModal({
   open,
   settings,
   renderer,
+  deskListening = null,
   onUpdateSettings,
   onResetCamera,
   onReplayHints,
@@ -24,6 +26,7 @@ export function SettingsModal({
   onClose,
 }: SettingsModalProps) {
   if (!open) return null;
+  const inDesk = deskListening !== null;
 
   return (
     <ModalShell labelledBy="settings-title" testId="settings-modal" onClose={onClose}>
@@ -145,7 +148,7 @@ export function SettingsModal({
                 <span>Desk mode</span>
               </button>
             )}
-            {renderer === '3d' && (
+            {!inDesk && renderer === '3d' && (
               <button
                 type="button"
                 className="secondary-pill-btn"
@@ -179,7 +182,17 @@ export function SettingsModal({
               : '2D studio mode — 3D (WebGL) isn’t available on this device. Sounds and saving work the same.'}
           </p>
           <p className="shortcut-note" data-testid="shortcut-note">
-            {renderer === '3d' ? (
+            {inDesk ? (
+              deskListening === 'pad' ? (
+                <>
+                  Desk mode: listening in the typing pad while this tab has focus. Close Settings and use Back to studio to return.
+                </>
+              ) : (
+                <>
+                  Desk mode: Background listening anywhere in this focused tab. Close Settings and use Back to studio to return.
+                </>
+              )
+            ) : renderer === '3d' ? (
               <>
                 Tip: Press <kbd>Space</kbd> to click · Drag to orbit · Double-tap backdrop to reset angle.
               </>

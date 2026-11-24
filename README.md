@@ -21,7 +21,7 @@ Thock Lab is a browser-based workshop for a one-key mechanical clicker. The stud
 
 Open **Desk mode** in the studio dock or under **Settings**. Pick a switch and base, then type in the pad to hear each press and release. Select **Background** to hear keys anywhere in the focused Thock Lab tab. A physical keyboard works on phones and tablets too.
 
-![Desk mode highlights a compact keyboard as text appears in the pad, then switches to Background and plays keys outside the pad](launch/desk-mode.gif)
+![Starts in the 3D studio with the Desk mode button highlighted in the bottom bar, then opens Desk mode where caps depress as text appears in the pad, switches to Clicky on Aluminum, and highlights caps in Background mode while the pad text stays unchanged](launch/desk-mode.gif)
 
 ## Architecture
 

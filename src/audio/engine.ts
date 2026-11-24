@@ -1,9 +1,37 @@
 import { ClickerBuild, getDailyVariant } from '../types/build';
-import { deskSamples, DESK_PHASE_SECONDS } from './deskSamples';
+import { deskFallbackTrim, deskSamples, DESK_PHASE_SECONDS } from './deskSamples';
 import { getNoiseBuffer, playMilestoneChime, prepareSwitchStroke } from './recipes';
 
 const SCHEDULE_AHEAD = 0.024;
 const MIN_STROKE_GAP = 0.045;
+const DESK_OVERLAP_WINDOW = 0.085;
+
+// True peak safety ceiling after the dynamics limiter.
+// Linear 1:1 up to CEILING_KNEE so single-stroke attacks stay transparent,
+// then smoothly saturates asymptotically toward CEILING_MAX (< 0.98).
+const CEILING_RANGE = 4.0;
+const CEILING_KNEE = 0.78;
+const CEILING_MAX = 0.95;
+
+let ceilingCurve: Float32Array<ArrayBuffer> | null = null;
+function getTruePeakCeilingCurve(): Float32Array<ArrayBuffer> {
+  if (!ceilingCurve) {
+    const length = 4097;
+    const half = (length - 1) / 2;
+    const span = CEILING_MAX - CEILING_KNEE;
+    ceilingCurve = new Float32Array(length);
+    for (let i = 0; i < length; i++) {
+      const x = ((i - half) / half) * CEILING_RANGE;
+      const abs = Math.abs(x);
+      if (abs <= CEILING_KNEE) {
+        ceilingCurve[i] = x;
+      } else {
+        ceilingCurve[i] = Math.sign(x) * (CEILING_KNEE + span * Math.tanh((abs - CEILING_KNEE) / span));
+      }
+    }
+  }
+  return ceilingCurve;
+}
 
 class ThockAudioEngine {
   private ctx: AudioContext | null = null;
@@ -13,6 +41,8 @@ class ThockAudioEngine {
   private broken = false;
   private clockCheck = 0;
   private pending: Array<() => void> = [];
+  private deskDownTimes: number[] = [];
+  private deskUpTimes: number[] = [];
 
   /** Called synchronously from trusted input so the browser can start its audio device. */
   public activate(canResume: boolean): void {
@@ -27,13 +57,20 @@ class ThockAudioEngine {
         const master = ctx.createGain();
         master.gain.setValueAtTime(this.targetGain(), ctx.currentTime);
         const limiter = ctx.createDynamicsCompressor();
-        limiter.threshold.value = -3;
-        limiter.knee.value = 6;
-        limiter.ratio.value = 10;
+        limiter.threshold.value = -4;
+        limiter.knee.value = 3;
+        limiter.ratio.value = 16;
         limiter.attack.value = 0.001;
-        limiter.release.value = 0.05;
+        limiter.release.value = 0.045;
+        const ceilingDrive = ctx.createGain();
+        ceilingDrive.gain.value = 1 / CEILING_RANGE;
+        const ceiling = ctx.createWaveShaper();
+        ceiling.curve = getTruePeakCeilingCurve();
+        ceiling.oversample = 'none';
         master.connect(limiter);
-        limiter.connect(ctx.destination);
+        limiter.connect(ceilingDrive);
+        ceilingDrive.connect(ceiling);
+        ceiling.connect(ctx.destination);
         getNoiseBuffer(ctx);
         this.ctx = ctx;
         this.masterGain = master;
@@ -109,6 +146,21 @@ class ThockAudioEngine {
     this.flush();
   }
 
+  private deskVoiceScale(phase: 'down' | 'up', time: number): number {
+    const history = phase === 'down' ? this.deskDownTimes : this.deskUpTimes;
+    let keep = 0;
+    for (let i = 0; i < history.length; i++) {
+      if (time - history[i] <= DESK_OVERLAP_WINDOW && history[i] <= time + 0.02) {
+        history[keep++] = history[i];
+      }
+    }
+    history.length = keep;
+    const scale = 1 / Math.sqrt(1 + 0.55 * keep);
+    history.push(time);
+    if (history.length > 16) history.shift();
+    return scale;
+  }
+
   public triggerDown(build: ClickerBuild, velocity: number): () => void {
     const daily = getDailyVariant(build.dailyVariantId) ?? null;
     const type = daily?.baseSwitch ?? build.switchType;
@@ -149,11 +201,11 @@ class ThockAudioEngine {
         const gain = ctx.createGain();
         source.buffer = buffer;
         source.playbackRate.value = touch.rate;
-        gain.gain.value = touch.gain;
         source.connect(gain);
         gain.connect(master);
         source.onended = () => gain.disconnect();
         const time = earliest();
+        gain.gain.value = touch.gain * this.deskVoiceScale(phase, time);
         source.start(time, phase === 'down' ? 0 : DESK_PHASE_SECONDS, DESK_PHASE_SECONDS);
         return time;
       }
@@ -161,11 +213,13 @@ class ThockAudioEngine {
       // The first stroke after a build change can precede the offline render.
       // Use the same synthesis on the live graph so that stroke still starts immediately.
       const daily = getDailyVariant(build.dailyVariantId);
-      const start = prepareSwitchStroke(ctx, master, daily?.baseSwitch ?? build.switchType, {
-        phase, baseMaterial: build.baseMaterial, dailyVariant: daily,
-        pitch: touch.rate, velocity: touch.gain,
-      });
+      const type = daily?.baseSwitch ?? build.switchType;
       const time = earliest();
+      const voiceGain = touch.gain * this.deskVoiceScale(phase, time) * deskFallbackTrim(type, build.baseMaterial);
+      const start = prepareSwitchStroke(ctx, master, type, {
+        phase, baseMaterial: build.baseMaterial, dailyVariant: daily,
+        pitch: touch.rate, velocity: voiceGain,
+      });
       start(time);
       return time;
     };

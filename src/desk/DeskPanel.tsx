@@ -7,20 +7,35 @@ import { DeskBoard } from './DeskBoard';
 import { createDeskKeys, deskTouch } from './keys';
 import './desk.css';
 
+export type DeskListening = 'pad' | 'tab';
+
 interface DeskPanelProps {
   build: ClickerBuild;
   dailySwitch: DailySwitchVariant & { id: NonNullable<ClickerBuild['dailyVariantId']> };
   muted: boolean;
+  listening: DeskListening;
+  padText: string;
+  onChangeListening: (next: DeskListening) => void;
+  onChangePadText: (next: string) => void;
   onChangeBuild: (patch: Partial<ClickerBuild>) => void;
   onClose: () => void;
 }
 
-type Listening = 'pad' | 'tab';
 const hasTabFocus = () => !document.hidden && document.hasFocus();
 
-export function DeskPanel({ build, dailySwitch, muted, onChangeBuild, onClose }: DeskPanelProps) {
-  const [listening, setListening] = useState<Listening>('pad');
+export function DeskPanel({
+  build,
+  dailySwitch,
+  muted,
+  listening,
+  padText,
+  onChangeListening,
+  onChangePadText,
+  onChangeBuild,
+  onClose,
+}: DeskPanelProps) {
   const [focused, setFocused] = useState(hasTabFocus);
+  const [padFocused, setPadFocused] = useState(false);
   const [pressed, setPressed] = useState<ReadonlySet<string>>(() => new Set());
   const padRef = useRef<HTMLTextAreaElement | null>(null);
   const listeningRef = useRef(listening);
@@ -31,7 +46,10 @@ export function DeskPanel({ build, dailySwitch, muted, onChangeBuild, onClose }:
   useEffect(() => { deskSamples(build); }, [build]);
 
   useEffect(() => {
-    if (!window.matchMedia('(pointer: coarse)').matches) padRef.current?.focus({ preventScroll: true });
+    if (!window.matchMedia('(pointer: coarse)').matches) {
+      padRef.current?.focus({ preventScroll: true });
+    }
+    setPadFocused(hasTabFocus() && document.activeElement === padRef.current);
   }, []);
 
   useEffect(() => {
@@ -59,8 +77,13 @@ export function DeskPanel({ build, dailySwitch, muted, onChangeBuild, onClose }:
       // Capturing keyboard events must stop even when the OS withholds the corresponding keyup.
       keys.clear();
       setFocused(false);
+      setPadFocused(false);
     };
-    const focus = () => setFocused(hasTabFocus());
+    const focus = () => {
+      const active = hasTabFocus();
+      setFocused(active);
+      setPadFocused(active && document.activeElement === padRef.current);
+    };
     const visibility = () => {
       if (document.hidden) blur();
       else focus();
@@ -82,22 +105,35 @@ export function DeskPanel({ build, dailySwitch, muted, onChangeBuild, onClose }:
   }, []);
 
   const selectedDaily = getDailyVariant(build.dailyVariantId);
-  const selectListening = (next: Listening) => {
-    setListening(next);
+  const selectListening = (next: DeskListening) => {
+    onChangeListening(next);
     if (next === 'pad' && !window.matchMedia('(pointer: coarse)').matches) {
       padRef.current?.focus({ preventScroll: true });
     }
   };
 
+  const activeListener = focused && !muted && (listening === 'tab' || padFocused);
+  const statusText = !focused
+    ? 'Paused · tab out of focus'
+    : muted
+      ? 'Sound muted'
+      : listening === 'pad' && !padFocused
+        ? 'Focus the typing pad'
+        : listening === 'pad'
+          ? 'Listening in typing pad'
+          : 'Tab focused';
+
   return (
     <section className="desk-view" aria-labelledby="desk-title" data-testid="desk-view">
       <div className="desk-layout">
         <header className="desk-header">
-          <div>
-            <button type="button" className="desk-back" onClick={onClose} data-testid="desk-close">
-              <ArrowLeft size={16} aria-hidden="true" /> Back to studio
-            </button>
-            <h1 id="desk-title">Desk mode</h1>
+          <div className="desk-title-block">
+            <div className="desk-title-row">
+              <button type="button" className="desk-back" onClick={onClose} data-testid="desk-close">
+                <ArrowLeft size={16} aria-hidden="true" /> Back to studio
+              </button>
+              <h1 id="desk-title">Desk mode</h1>
+            </div>
             <p id="desk-scope">Key sounds work while this tab has focus.</p>
           </div>
           <div className="desk-build">
@@ -139,11 +175,17 @@ export function DeskPanel({ build, dailySwitch, muted, onChangeBuild, onClose }:
               <button type="button" aria-pressed={listening === 'pad'} onClick={() => selectListening('pad')}>Typing pad</button>
               <button type="button" aria-pressed={listening === 'tab'} onClick={() => selectListening('tab')}>Background</button>
             </div>
+            <p className="desk-mobile-note"><Keyboard size={15} aria-hidden="true" /> Pair a physical keyboard to play.</p>
             <label htmlFor="desk-pad">Type here</label>
             <textarea
               ref={padRef}
               id="desk-pad"
+              dir="auto"
               rows={4}
+              value={padText}
+              onChange={(event) => onChangePadText(event.target.value)}
+              onFocus={() => setPadFocused(true)}
+              onBlur={() => setPadFocused(false)}
               placeholder="The quick brown fox…"
               aria-describedby="desk-scope desk-listening-note"
               spellCheck={false}
@@ -151,13 +193,20 @@ export function DeskPanel({ build, dailySwitch, muted, onChangeBuild, onClose }:
               autoComplete="off"
             />
             <p className="desk-listening-note" id="desk-listening-note">
-              {listening === 'pad' ? 'Plays while you type in the pad.' : 'Plays anywhere in this tab, even outside the pad.'}
+              {listening === 'pad'
+                ? 'Plays while you type here. Scratch pad clears on reload.'
+                : 'Plays anywhere in this tab; scratch pad stays until reload.'}
             </p>
-            <p className="desk-mobile-note"><Keyboard size={15} aria-hidden="true" /> Pair a physical keyboard to play.</p>
           </div>
         </div>
-        <p className="desk-status" data-focused={focused} data-muted={muted} role="status">
-          {!focused ? 'Paused · tab out of focus' : muted ? 'Sound muted' : 'Tab focused'}
+        <p
+          className="desk-status"
+          data-active={activeListener}
+          data-focused={focused}
+          data-muted={muted}
+          role="status"
+        >
+          {statusText}
         </p>
       </div>
     </section>

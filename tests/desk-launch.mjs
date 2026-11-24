@@ -81,18 +81,26 @@ try {
     assert.deepEqual(studio.errors, []);
     await studio.context.close();
 
-    const desktop = await open(browser, { viewport: { width: 1120, height: 704 } });
+    // Start the GIF in the 3D Studio with the Desk button hovered/focused so viewers see the entry route.
+    const desktop = await open(browser, { viewport: { width: 1120, height: 704 }, studio: true });
     const { page } = desktop;
-    await page.getByTestId('mode-desk-btn').click();
+    await page.waitForFunction(() => window.__thockScene?.precompiled(), null, { timeout: 90000 });
+    await page.evaluate(() => window.__thockScene.advance(16));
+    const deskBtn = page.getByTestId('mode-desk-btn');
+    await deskBtn.hover();
+    await deskBtn.focus();
+    await frame(page, 1.40);
+
+    await deskBtn.click();
     await page.getByRole('heading', { name: 'Desk mode' }).waitFor();
     await page.evaluate(() => document.fonts.ready);
-    await frame(page, 1.32);
+    await frame(page, 1.12);
     for (const key of ['T', 'h', 'o', 'c', 'k', 'Space', 'l', 'a', 'b']) {
       await hold(page, key);
       await frame(page, 0.28);
       await page.keyboard.up(key);
     }
-    await frame(page, 0.88);
+    await frame(page, 0.84);
     await hold(page, 'Space');
     await still(page, 'desk-desktop.jpg');
     await page.keyboard.up('Space');
@@ -102,13 +110,13 @@ try {
     await page.getByRole('button', { name: 'Background' }).click();
     await page.getByRole('heading', { name: 'Desk mode' }).click();
     await page.mouse.move(12, 688);
-    await frame(page, 1.36);
+    await frame(page, 1.32);
     for (const key of ['a', 's', 'd', 'Space', 'Enter']) {
       await hold(page, key);
       await frame(page, 0.28);
       await page.keyboard.up(key);
     }
-    await frame(page, 1.64);
+    await frame(page, 1.56);
     assert.deepEqual(desktop.errors, []);
     await desktop.context.close();
 

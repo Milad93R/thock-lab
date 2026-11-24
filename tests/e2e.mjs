@@ -407,7 +407,7 @@ async function pressClicker(page, mobile) {
 async function suiteStatic(browser) {
   const ctx = await browser.newContext();
   const r = await ctx.request;
-  for (const p of ['/manifest.webmanifest', '/favicon.svg', '/robots.txt', '/sw.js', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/icon-maskable-192.png', '/apple-touch-icon.png', '/og.png', '/404.html']) {
+  for (const p of ['/manifest.webmanifest', '/favicon.svg', '/favicon.ico', '/robots.txt', '/sw.js', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/icon-maskable-192.png', '/apple-touch-icon.png', '/og.png', '/404.html']) {
     const res = await r.get(BASE_URL + p);
     assert(res.status() === 200, `${p} → ${res.status()}`);
     if (p === '/og.png') {
@@ -430,6 +430,12 @@ async function suiteStatic(browser) {
   const nf = await r.get(BASE_URL + '/nonexistent-route-qa');
   // (vite preview serves the SPA for unknown routes; Cloudflare Pages serves 404.html with 404)
   if (!LOCAL) assert(nf.status() === 404 && (await nf.text()).includes('Missing Keycap'), `unknown route should 404, got ${nf.status()}`);
+  const p404 = await ctx.newPage();
+  await p404.setViewportSize({ width: 1440, height: 900 });
+  await p404.goto(BASE_URL + '/404.html', { waitUntil: 'load' });
+  const scroll404 = await p404.evaluate(() => ({ sh: document.documentElement.scrollHeight, ch: document.documentElement.clientHeight }));
+  assert(scroll404.sh <= scroll404.ch, `404 page should not have unnecessary scrollbar: ${JSON.stringify(scroll404)}`);
+  await p404.close();
   await ctx.close();
 }
 
@@ -2152,6 +2158,10 @@ async function suiteDesk(browser) {
     };
     await waitForSamples(1);
     assert(await pad.evaluate((field) => document.activeElement === field), 'Desktop Desk opens with the pad focused');
+    assert(await pad.getAttribute('dir') === 'auto', 'Typing pad uses dir="auto"');
+    const status = page.locator('.desk-status');
+    await page.getByText('Listening in typing pad', { exact: true }).waitFor();
+    assert(await status.getAttribute('data-active') === 'true', 'Focused pad shows active green status');
     const rest = await key('KeyA').evaluate((cap) => getComputedStyle(cap).transform);
     await page.keyboard.down('a');
     await checkHeld('KeyA', true);
@@ -2168,10 +2178,18 @@ async function suiteDesk(browser) {
     assert(first[0].energy > first[1].energy && first[1].energy > 0.001, 'Down and up samples contain distinct audio');
     assert(first[0].ahead <= 0.002, 'A warmed downstroke schedules at the current audio clock');
 
+    // Blurring pad in Typing pad mode turns status inactive with clear cue
     await page.getByRole('heading', { name: 'Desk mode' }).click();
+    await page.getByText('Focus the typing pad', { exact: true }).waitFor();
+    assert(await status.getAttribute('data-active') === 'false', 'Blurred pad shows inactive status');
     await page.keyboard.press('F2');
     assert((await audio()).length === 2, 'Pad mode ignores keys outside the pad');
+
+    // Switching to Background preserves pad text and activates status
     await page.getByRole('button', { name: 'Background' }).click();
+    await page.getByText('Tab focused', { exact: true }).waitFor();
+    assert(await status.getAttribute('data-active') === 'true', 'Background mode shows active status');
+    assert(/^a+$/.test(await pad.inputValue()), 'Switching to Background preserves pad text');
     await page.getByRole('heading', { name: 'Desk mode' }).click();
     await page.keyboard.down('Space');
     await checkHeld('Space', true);
@@ -2205,6 +2223,7 @@ async function suiteDesk(browser) {
     await waitForAudio(11);
     await page.evaluate(() => window.__deskTabFocus(false));
     await page.getByText('Paused · tab out of focus').waitFor();
+    assert(await status.getAttribute('data-active') === 'false', 'Unfocused tab shows inactive status');
     await checkHeld('KeyX', false);
     await page.keyboard.press('z');
     await checkHeld('KeyZ', false);
@@ -2217,21 +2236,45 @@ async function suiteDesk(browser) {
     assert((await audio()).length === 13, 'Focus restores fresh strokes and discards orphaned keyup');
 
     await page.getByTestId('settings-btn').click();
+    const deskShortcutNote = await page.getByTestId('shortcut-note').innerText();
+    assert(!/Press Space|Drag to orbit/i.test(deskShortcutNote), `Desk Settings must not advertise Studio shortcuts: ${deskShortcutNote}`);
+    assert(/Desk mode|Back to studio/i.test(deskShortcutNote), `Desk Settings explains Desk scope & return: ${deskShortcutNote}`);
     await page.getByTestId('volume-slider').fill('0.37');
     await page.waitForFunction(() => window.__deskAudio.masterTarget === 0.37);
     await page.getByTestId('close-settings-btn').click();
     await page.getByTestId('mute-btn').click();
+    await page.getByText('Sound muted', { exact: true }).waitFor();
+    assert(await status.getAttribute('data-active') === 'false', 'Muted Desk shows inactive status');
     await page.getByRole('heading', { name: 'Desk mode' }).click();
     await page.keyboard.down('Enter');
     await checkHeld('Enter', true);
     await page.keyboard.up('Enter');
     await checkHeld('Enter', false);
     assert((await audio()).length === 13, 'Mute preserves key feedback and suppresses both audio phases');
+    // RTL + mixed-script input with Persian digits, emoji, caret movement and Backspace
+    await pad.click();
+    await pad.fill('Hello world');
+    assert(await pad.evaluate((el) => getComputedStyle(el).direction) === 'ltr', 'Latin-first text resolves LTR direction');
+    await pad.evaluate((el) => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); });
+    await page.keyboard.press('ArrowLeft');
+    await page.keyboard.press('Backspace');
+    assert(await pad.inputValue() === 'Hello word', `LTR caret movement and Backspace work (got ${JSON.stringify(await pad.inputValue())})`);
+    await pad.fill('سلام ۱۲۳ 🎉\nHello world!');
+    assert(await pad.evaluate((el) => getComputedStyle(el).direction) === 'rtl', 'Persian-first text resolves RTL direction');
+    assert(await pad.evaluate((el) => getComputedStyle(el).unicodeBidi) === 'plaintext', 'Typing pad uses plaintext bidi per paragraph');
+    await pad.evaluate((el) => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); });
+    await page.keyboard.press('Backspace');
+    assert(await pad.inputValue() === 'سلام ۱۲۳ 🎉\nHello world', `Mixed-script Backspace works (got ${JSON.stringify(await pad.inputValue())})`);
+    await page.getByTestId('desk-close').click();
+    await page.getByTestId('mode-desk-btn').waitFor();
+    // Reopening Desk in the same session preserves pad text in memory
+    await page.getByTestId('mode-desk-btn').click();
+    assert((await pad.inputValue()).includes('سلام ۱۲۳'), 'Pad text persists across Studio <-> Desk within session');
     await page.getByTestId('desk-close').click();
     await page.getByTestId('mode-desk-btn').waitFor();
     await page.reload();
     await page.getByTestId('mode-desk-btn').click();
-    assert(await pad.inputValue() === '', 'Typing pad contents are not persisted');
+    assert(await pad.inputValue() === '', 'Typing pad contents are not persisted across reload');
     assert(await page.getByLabel('Switch', { exact: true }).inputValue() === 'clicky', 'Switch persists');
     assert(await page.getByLabel('Base', { exact: true }).inputValue() === 'aluminum', 'Base persists');
     assert(await page.getByTestId('mute-btn').getAttribute('aria-pressed') === 'true', 'Mute persists');
@@ -2252,12 +2295,38 @@ async function suiteDesk(browser) {
     await mobile.page.getByTestId('settings-desk-btn').tap();
     assert(await mobile.page.getByText('Pair a physical keyboard to play.').isVisible(), 'Touch mode explains the physical keyboard');
     assert(!await mobile.page.getByLabel('Type here').evaluate((field) => document.activeElement === field), 'Desk entry does not summon the software keyboard');
+    const noteAbovePad = await mobile.page.evaluate(() => {
+      const note = document.querySelector('.desk-mobile-note')?.getBoundingClientRect();
+      const pad = document.querySelector('#desk-pad')?.getBoundingClientRect();
+      return !!(note && pad && note.bottom <= pad.top + 4);
+    });
+    assert(noteAbovePad, 'Physical-keyboard prerequisite appears before the textarea on touch');
     await assertNoOverflow(mobile.page, `${label}-mobile`);
     await mobile.page.getByTestId('desk-close').tap();
     await mobile.page.getByTestId('fallback-clicker').waitFor();
     assert(!mobile.errors.length, mobile.errors.join('\n'));
   } finally {
     await mobile.ctx.close();
+  }
+
+  // Compact Desk first-screen keyboard visibility check (360x640)
+  const compact = await open(browser, mobileOptions(360, 640), `${label}-compact360`);
+  try {
+    await compact.page.getByTestId('settings-btn').tap();
+    await compact.page.getByTestId('settings-desk-btn').tap();
+    await compact.page.getByTestId('desk-board').waitFor();
+    await shot(compact.page, `desk-fix1-${ENGINE}-360x640`);
+    const boardVis = await compact.page.evaluate(() => {
+      const r = document.querySelector('[data-testid="desk-board"]')?.getBoundingClientRect();
+      if (!r || r.height <= 0) return { ratio: 0 };
+      const visible = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+      return { top: r.top, bottom: r.bottom, height: r.height, visible, ratio: visible / r.height };
+    });
+    assert(boardVis.ratio >= 0.75, `Compact 360x640 Desk should show most of the keyboard on first screen: ${JSON.stringify(boardVis)}`);
+    await assertNoOverflow(compact.page, `${label}-compact360`);
+    assert(!compact.errors.length, compact.errors.join('\n'));
+  } finally {
+    await compact.ctx.close();
   }
 }
 
