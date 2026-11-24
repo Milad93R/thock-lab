@@ -1,9 +1,10 @@
-import { BookmarkPlus, Camera, Check, Dices, Hand, Share2, Sliders } from 'lucide-react';
+import { BookmarkPlus, Camera, Check, Dices, Hand, Keyboard, Share2, Sliders } from 'lucide-react';
 import type { ToastAction } from './ToastStack';
 
 interface BottomBarProps {
   mode: 'play' | 'customize';
   onSetMode: (mode: 'play' | 'customize') => void;
+  onOpenDesk: () => void;
   onRandomize: () => void;
   onSaveToShelf: () => void;
   onShare: (opener: HTMLButtonElement) => void;
@@ -12,7 +13,7 @@ interface BottomBarProps {
   confirmedAction?: ToastAction;
 }
 
-export function BottomBar({ mode, onSetMode, onRandomize, onSaveToShelf, onShare, onSnapshot, shelfFull, confirmedAction }: BottomBarProps) {
+export function BottomBar({ mode, onSetMode, onOpenDesk, onRandomize, onSaveToShelf, onShare, onSnapshot, shelfFull, confirmedAction }: BottomBarProps) {
   return (
     <div className="bottom-dock" role="toolbar" aria-label="Main clicker actions">
       <div className="mode-toggle" role="group" aria-label="Interaction mode">
@@ -35,6 +36,15 @@ export function BottomBar({ mode, onSetMode, onRandomize, onSaveToShelf, onShare
         >
           <Sliders size={16} aria-hidden="true" className="mode-tab-icon" />
           <span>Customize</span>
+        </button>
+        <button
+          type="button"
+          className="mode-tab desk-mode-tab"
+          onClick={onOpenDesk}
+          data-testid="mode-desk-btn"
+        >
+          <Keyboard size={16} aria-hidden="true" />
+          <span>Desk mode</span>
         </button>
       </div>
 

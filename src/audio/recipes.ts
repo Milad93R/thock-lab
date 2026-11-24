@@ -15,6 +15,8 @@ export interface RecipeOptions {
   rand?: () => number;
   /** Velocity / combo intensity multiplier (default 1.0) */
   velocity?: number;
+  /** Physical key resonance multiplier */
+  pitch?: number;
 }
 
 type StrokeLayer = (startTime: number) => void;
@@ -314,7 +316,7 @@ function prepareToneSweep(
  */
 const prepareDeepThockRecipe: SwitchRecipeFn = (ctx, bus, opts, addLayer) => {
   const rng = opts.rand ?? Math.random;
-  const pJit = jitter(rng, 0.04) * (opts.dailyVariant?.pitchMult ?? 1);
+  const pJit = jitter(rng, 0.04) * (opts.pitch ?? 1) * (opts.dailyVariant?.pitchMult ?? 1);
   const gJit = jitter(rng, 0.04) * (opts.velocity ?? 1);
   const bodyMult = opts.dailyVariant?.bodyFreqMult ?? 1;
   const tail = opts.dailyVariant?.tailMult ?? 1;
@@ -390,7 +392,7 @@ const prepareDeepThockRecipe: SwitchRecipeFn = (ctx, bus, opts, addLayer) => {
  */
 const prepareClickyRecipe: SwitchRecipeFn = (ctx, bus, opts, addLayer) => {
   const rng = opts.rand ?? Math.random;
-  const pJit = jitter(rng, 0.04) * (opts.dailyVariant?.pitchMult ?? 1);
+  const pJit = jitter(rng, 0.04) * (opts.pitch ?? 1) * (opts.dailyVariant?.pitchMult ?? 1);
   const gJit = jitter(rng, 0.04) * (opts.velocity ?? 1);
   const bright = opts.dailyVariant?.clickBrightMult ?? 1;
   const tail = opts.dailyVariant?.tailMult ?? 1;
@@ -467,7 +469,7 @@ const prepareClickyRecipe: SwitchRecipeFn = (ctx, bus, opts, addLayer) => {
  */
 const prepareTactileRecipe: SwitchRecipeFn = (ctx, bus, opts, addLayer) => {
   const rng = opts.rand ?? Math.random;
-  const pJit = jitter(rng, 0.04) * (opts.dailyVariant?.pitchMult ?? 1);
+  const pJit = jitter(rng, 0.04) * (opts.pitch ?? 1) * (opts.dailyVariant?.pitchMult ?? 1);
   const gJit = jitter(rng, 0.04) * (opts.velocity ?? 1);
   const bodyMult = opts.dailyVariant?.bodyFreqMult ?? 1;
   const tail = opts.dailyVariant?.tailMult ?? 1;
@@ -541,7 +543,7 @@ const prepareTactileRecipe: SwitchRecipeFn = (ctx, bus, opts, addLayer) => {
  */
 const prepareLinearRecipe: SwitchRecipeFn = (ctx, bus, opts, addLayer) => {
   const rng = opts.rand ?? Math.random;
-  const pJit = jitter(rng, 0.04) * (opts.dailyVariant?.pitchMult ?? 1);
+  const pJit = jitter(rng, 0.04) * (opts.pitch ?? 1) * (opts.dailyVariant?.pitchMult ?? 1);
   const gJit = jitter(rng, 0.04) * (opts.velocity ?? 1);
   const bodyMult = opts.dailyVariant?.bodyFreqMult ?? 1;
   const tail = opts.dailyVariant?.tailMult ?? 1;
@@ -607,7 +609,7 @@ const prepareLinearRecipe: SwitchRecipeFn = (ctx, bus, opts, addLayer) => {
  */
 const prepareBubblePopRecipe: SwitchRecipeFn = (ctx, bus, opts, addLayer) => {
   const rng = opts.rand ?? Math.random;
-  const pJit = jitter(rng, 0.04) * (opts.dailyVariant?.pitchMult ?? 1);
+  const pJit = jitter(rng, 0.04) * (opts.pitch ?? 1) * (opts.dailyVariant?.pitchMult ?? 1);
   const gJit = jitter(rng, 0.04) * (opts.velocity ?? 1);
   const tail = opts.dailyVariant?.tailMult ?? 1;
 
@@ -671,7 +673,7 @@ const prepareBubblePopRecipe: SwitchRecipeFn = (ctx, bus, opts, addLayer) => {
  */
 const prepareRetroArcadeRecipe: SwitchRecipeFn = (ctx, bus, opts, addLayer) => {
   const rng = opts.rand ?? Math.random;
-  const pJit = jitter(rng, 0.04) * (opts.dailyVariant?.pitchMult ?? 1);
+  const pJit = jitter(rng, 0.04) * (opts.pitch ?? 1) * (opts.dailyVariant?.pitchMult ?? 1);
   const gJit = jitter(rng, 0.04) * (opts.velocity ?? 1);
   const bright = opts.dailyVariant?.clickBrightMult ?? 1;
   const tail = opts.dailyVariant?.tailMult ?? 1;

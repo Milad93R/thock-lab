@@ -1,4 +1,5 @@
 import { ClickerBuild, getDailyVariant } from '../types/build';
+import { deskSamples, DESK_PHASE_SECONDS } from './deskSamples';
 import { getNoiseBuffer, playMilestoneChime, prepareSwitchStroke } from './recipes';
 
 const SCHEDULE_AHEAD = 0.024;
@@ -129,6 +130,58 @@ class ThockAudioEngine {
     return () => this.whenReady(() => {
       if (downTime !== undefined) play('up');
     });
+  }
+
+  public triggerDeskDown(build: ClickerBuild, touch: { rate: number; gain: number }): (released: boolean) => void {
+    const buffer = deskSamples(build);
+    let downTime: number | undefined;
+    let cancelled = false;
+
+    const play = (phase: 'down' | 'up') => {
+      const ctx = this.ctx!;
+      const master = this.masterGain!;
+      const earliest = () => phase === 'down'
+        ? ctx.currentTime
+        : Math.max(ctx.currentTime, downTime! + 0.012);
+
+      if (buffer) {
+        const source = ctx.createBufferSource();
+        const gain = ctx.createGain();
+        source.buffer = buffer;
+        source.playbackRate.value = touch.rate;
+        gain.gain.value = touch.gain;
+        source.connect(gain);
+        gain.connect(master);
+        source.onended = () => gain.disconnect();
+        const time = earliest();
+        source.start(time, phase === 'down' ? 0 : DESK_PHASE_SECONDS, DESK_PHASE_SECONDS);
+        return time;
+      }
+
+      // The first stroke after a build change can precede the offline render.
+      // Use the same synthesis on the live graph so that stroke still starts immediately.
+      const daily = getDailyVariant(build.dailyVariantId);
+      const start = prepareSwitchStroke(ctx, master, daily?.baseSwitch ?? build.switchType, {
+        phase, baseMaterial: build.baseMaterial, dailyVariant: daily,
+        pitch: touch.rate, velocity: touch.gain,
+      });
+      const time = earliest();
+      start(time);
+      return time;
+    };
+
+    this.whenReady(() => {
+      if (!cancelled) downTime = play('down');
+    });
+    return (released) => {
+      if (!released) {
+        cancelled = true;
+        return;
+      }
+      this.whenReady(() => {
+        if (!cancelled && downTime !== undefined) play('up');
+      });
+    };
   }
 
   public triggerMilestone(milestone: number): void {

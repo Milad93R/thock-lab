@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { flushSync } from 'react-dom';
 import { X } from 'lucide-react';
 import { audioEngine } from './audio/engine';
+import { DeskPanel } from './desk/DeskPanel';
 import { AchievementsModal } from './components/AchievementsModal';
 import { BottomBar } from './components/BottomBar';
 import { ClickerStage, ClickerStageHandle, RendererMode } from './components/ClickerStage';
@@ -135,9 +136,23 @@ export function App() {
   }, []);
 
   const [state, setState] = useState<PersistedState>(initial.state);
-  const [mode, setMode] = useState<'play' | 'customize'>('play');
+  const [mode, setMode] = useState<'play' | 'customize' | 'desk'>('play');
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
   const [activeTab, setActiveTab] = useState<CustomizeTab>('switch');
   const [dialog, setDialog] = useState<'shelf' | 'achievements' | 'settings' | null>(null);
+  const deskOpener = useRef<'mode-desk-btn' | 'settings-btn'>('mode-desk-btn');
+  const openDesk = (opener: typeof deskOpener.current) => {
+    deskOpener.current = opener;
+    setDialog(null);
+    setMode('desk');
+  };
+  const closeDesk = () => {
+    setMode('play');
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>(`[data-testid="${deskOpener.current}"]`)?.focus({ preventScroll: true });
+    });
+  };
   const [shareFallback, setShareFallback] = useState<{ url: string; opener: HTMLButtonElement } | null>(null);
   const shareRequestRef = useRef(0);
   const [hintStep, setHintStep] = useState<number>(() => (initial.state.hintsDismissed ? -1 : 0));
@@ -538,7 +553,7 @@ export function App() {
         else setDialog(null);
         return;
       }
-      if (e.defaultPrevented || (e.code !== 'Space' && e.key !== ' ')) return;
+      if (modeRef.current === 'desk' || e.defaultPrevented || (e.code !== 'Space' && e.key !== ' ')) return;
       if (activeDialogRef.current) return;
       const stage = document.querySelector('.stage-viewport');
       if (stage && getComputedStyle(stage).visibility === 'hidden') return;
@@ -832,7 +847,7 @@ export function App() {
     <main
       className={[
         'app-shell',
-        mode === 'customize' ? 'is-customizing' : 'is-playing',
+        mode === 'desk' ? 'is-desk' : mode === 'customize' ? 'is-customizing' : 'is-playing',
         state.settings.reducedMotion ? 'is-reduced-motion' : '',
         isGlow ? 'is-glow' : '',
         showHints ? 'has-hints' : '',
@@ -876,6 +891,16 @@ export function App() {
         onOpenSettings={() => setDialog('settings')}
       />
 
+      {mode === 'desk' && (
+        <DeskPanel
+          build={state.currentBuild}
+          dailySwitch={dailySwitch}
+          muted={state.settings.muted}
+          onChangeBuild={updateBuild}
+          onClose={closeDesk}
+        />
+      )}
+
       <CounterHud
         totalClicks={state.stats.totalClicks}
         combo={combo}
@@ -901,8 +926,9 @@ export function App() {
       />
 
       <BottomBar
-        mode={mode}
+        mode={mode === 'desk' ? 'play' : mode}
         onSetMode={setMode}
+        onOpenDesk={() => openDesk('mode-desk-btn')}
         onRandomize={handleRandomize}
         onSaveToShelf={handleSaveToShelf}
         onShare={handleShare}
@@ -939,6 +965,7 @@ export function App() {
           setHintStep(0);
           setState((prev) => ({ ...prev, hintsDismissed: false }));
         }}
+        onOpenDesk={mode === 'desk' ? undefined : () => openDesk('settings-btn')}
         onClose={() => setDialog(null)}
       />
 

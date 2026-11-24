@@ -1,4 +1,4 @@
-import { Box, Gauge, RotateCcw, Smartphone, Volume2, VolumeX, X } from 'lucide-react';
+import { Box, Gauge, Keyboard, RotateCcw, Smartphone, Volume2, VolumeX, X } from 'lucide-react';
 import { ModalShell } from './ModalShell';
 import { UserSettings } from '../storage/store';
 
@@ -9,6 +9,7 @@ interface SettingsModalProps {
   onUpdateSettings: (patch: Partial<UserSettings>) => void;
   onResetCamera: () => void;
   onReplayHints: () => void;
+  onOpenDesk?: () => void;
   onClose: () => void;
 }
 
@@ -19,6 +20,7 @@ export function SettingsModal({
   onUpdateSettings,
   onResetCamera,
   onReplayHints,
+  onOpenDesk,
   onClose,
 }: SettingsModalProps) {
   if (!open) return null;
@@ -137,6 +139,12 @@ export function SettingsModal({
           </div>
 
           <div className="settings-footer-actions">
+            {onOpenDesk && (
+              <button type="button" className="secondary-pill-btn" onClick={onOpenDesk} data-testid="settings-desk-btn">
+                <Keyboard size={14} aria-hidden="true" />
+                <span>Desk mode</span>
+              </button>
+            )}
             {renderer === '3d' && (
               <button
                 type="button"

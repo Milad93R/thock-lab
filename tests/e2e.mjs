@@ -18,8 +18,8 @@ const QA = path.resolve('qa');
 fs.mkdirSync(QA, { recursive: true });
 const DEFAULT_SUITES =
   ENGINE === 'webkit'
-    ? ['round7', 'geometry', 'breakpoints', 'round5', 'round6', 'webkit-iphone', ...(LOCAL ? [] : ['webkit-offline'])]
-    : ['round7', 'static', 'geometry', 'breakpoints', 'round5', 'round6', 'desktop', 'tablet', 'mobile390', 'mobile390x664', 'mobile360x640', 'landscape667', 'landscape', 'malformed', 'offline'];
+    ? ['desk', 'round7', 'geometry', 'breakpoints', 'round5', 'round6', 'webkit-iphone', ...(LOCAL ? [] : ['webkit-offline'])]
+    : ['desk', 'round7', 'static', 'geometry', 'breakpoints', 'round5', 'round6', 'desktop', 'tablet', 'mobile390', 'mobile390x664', 'mobile360x640', 'landscape667', 'landscape', 'malformed', 'offline'];
 const SUITES = process.env.SUITES ? process.env.SUITES.split(',') : DEFAULT_SUITES;
 const IPHONE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1';
@@ -2085,6 +2085,182 @@ async function suiteWebKitOffline(browser) {
   }
 }
 
+async function suiteDesk(browser) {
+  const label = `desk-${ENGINE}`;
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
+  try {
+    await ctx.addInitScript(INIT);
+    await ctx.addInitScript(() => {
+      if (location.origin === 'null') return;
+      if (!localStorage.getItem('thock-lab:v1')) {
+        localStorage.setItem('thock-lab:v1', JSON.stringify({ hintsDismissed: true }));
+      }
+      const probe = window.__deskAudio = { renders: 0, strokes: [] };
+      const setTarget = AudioParam.prototype.setTargetAtTime;
+      AudioParam.prototype.setTargetAtTime = function (target) {
+        if (this === window.__audioStats.master?.gain) probe.masterTarget = target;
+        return setTarget.apply(this, arguments);
+      };
+      // Playwright emulates foreground focus for each headless tab. Drive the
+      // browser state and events explicitly while sending trusted API key input.
+      const nativeHasFocus = document.hasFocus.bind(document);
+      let tabFocused;
+      document.hasFocus = () => tabFocused ?? nativeHasFocus();
+      window.__deskTabFocus = (focused) => {
+        tabFocused = focused;
+        window.dispatchEvent(new FocusEvent(focused ? 'focus' : 'blur'));
+      };
+      const render = OfflineAudioContext.prototype.startRendering;
+      OfflineAudioContext.prototype.startRendering = function () {
+        return render.call(this).then((buffer) => {
+          if (buffer.length === 24000) probe.renders++;
+          return buffer;
+        });
+      };
+      const start = AudioBufferSourceNode.prototype.start;
+      AudioBufferSourceNode.prototype.start = function (when, offset, duration) {
+        if (this.buffer?.length === 24000) {
+          const data = this.buffer.getChannelData(0);
+          let energy = 0;
+          const first = Math.floor(offset * this.buffer.sampleRate);
+          for (let i = first; i < first + duration * this.buffer.sampleRate; i++) energy += data[i] ** 2;
+          probe.strokes.push({
+            phase: offset ? 'up' : 'down',
+            rate: this.playbackRate.value,
+            ahead: when - this.context.currentTime,
+            energy,
+          });
+        }
+        return start.apply(this, arguments);
+      };
+    });
+    const page = await ctx.newPage();
+    page.setDefaultTimeout(8000);
+    const errors = guard(page, label);
+    await page.goto(BASE_URL + '/');
+    await page.getByTestId('mode-desk-btn').click();
+    const pad = page.getByLabel('Type here');
+    const key = (code) => page.locator(`[data-code="${code}"]`);
+    const audio = () => page.evaluate(() => window.__deskAudio.strokes);
+    const waitForAudio = (count) => page.waitForFunction((expected) => window.__deskAudio.strokes.length >= expected, count)
+      .catch(async () => { throw new Error(`Expected ${count} Desk buffer starts, got ${(await audio()).length}`); });
+    const waitForSamples = (count) => page.waitForFunction((expected) => window.__deskAudio.renders >= expected, count)
+      .catch(async () => { throw new Error(`Expected ${count} rendered Desk sounds, got ${await page.evaluate(() => window.__deskAudio.renders)}`); });
+    const checkHeld = async (code, held) => {
+      await page.waitForFunction(([code, held]) =>
+        (document.querySelector(`[data-code="${code}"]`)?.getAttribute('data-down') === 'true') === held, [code, held]);
+    };
+    await waitForSamples(1);
+    assert(await pad.evaluate((field) => document.activeElement === field), 'Desktop Desk opens with the pad focused');
+    const rest = await key('KeyA').evaluate((cap) => getComputedStyle(cap).transform);
+    await page.keyboard.down('a');
+    await checkHeld('KeyA', true);
+    await waitForAudio(1);
+    assert(await key('KeyA').evaluate((cap) => getComputedStyle(cap).transform) === rest, 'Reduced motion keeps the highlight without travel');
+    await page.keyboard.down('a');
+    assert((await audio()).length === 1, 'Holding a key schedules only one downstroke');
+    await page.keyboard.up('a');
+    await checkHeld('KeyA', false);
+    await waitForAudio(2);
+    assert(/^a+$/.test(await pad.inputValue()), 'Native typing and repeat reach the pad');
+    const first = await audio();
+    assert(first[0].phase === 'down' && first[1].phase === 'up', 'Separate down and up buffers start in order');
+    assert(first[0].energy > first[1].energy && first[1].energy > 0.001, 'Down and up samples contain distinct audio');
+    assert(first[0].ahead <= 0.002, 'A warmed downstroke schedules at the current audio clock');
+
+    await page.getByRole('heading', { name: 'Desk mode' }).click();
+    await page.keyboard.press('F2');
+    assert((await audio()).length === 2, 'Pad mode ignores keys outside the pad');
+    await page.getByRole('button', { name: 'Background' }).click();
+    await page.getByRole('heading', { name: 'Desk mode' }).click();
+    await page.keyboard.down('Space');
+    await checkHeld('Space', true);
+    await page.keyboard.down('Shift');
+    await checkHeld('ShiftLeft', true);
+    await page.keyboard.up('Space');
+    await checkHeld('Space', false);
+    await checkHeld('ShiftLeft', true);
+    await page.keyboard.up('Shift');
+    await checkHeld('ShiftLeft', false);
+    await waitForAudio(6);
+    const chord = await audio();
+    assert(chord[2].rate < first[0].rate * 0.9, 'Space uses the lower stabilizer pitch');
+    assert(chord[2].rate === chord[4].rate && chord[3].rate === chord[5].rate, 'Each release keeps its physical key tuning');
+
+    await page.keyboard.press('NumpadEnter');
+    await waitForAudio(8);
+    assert(await key('NumpadEnter').count() === 0, 'An unmapped physical key plays without a visible cap');
+
+    // Change switch and base together, then verify the cached sample changes.
+    await page.getByLabel('Switch', { exact: true }).selectOption('clicky');
+    await page.getByLabel('Base', { exact: true }).selectOption('aluminum');
+    await waitForSamples(3);
+    await page.getByRole('heading', { name: 'Desk mode' }).click();
+    await page.keyboard.press('a');
+    await waitForAudio(10);
+    assert((await audio())[8].energy !== first[0].energy, 'New switch and base use a different sample');
+
+    await page.keyboard.down('x');
+    await checkHeld('KeyX', true);
+    await waitForAudio(11);
+    await page.evaluate(() => window.__deskTabFocus(false));
+    await page.getByText('Paused · tab out of focus').waitFor();
+    await checkHeld('KeyX', false);
+    await page.keyboard.press('z');
+    await checkHeld('KeyZ', false);
+    assert((await audio()).length === 11, 'Unfocused tab neither plays key input nor invents a release');
+    await page.evaluate(() => window.__deskTabFocus(true));
+    await page.getByText('Tab focused', { exact: true }).waitFor();
+    await page.keyboard.up('x');
+    await page.keyboard.press('x');
+    await waitForAudio(13);
+    assert((await audio()).length === 13, 'Focus restores fresh strokes and discards orphaned keyup');
+
+    await page.getByTestId('settings-btn').click();
+    await page.getByTestId('volume-slider').fill('0.37');
+    await page.waitForFunction(() => window.__deskAudio.masterTarget === 0.37);
+    await page.getByTestId('close-settings-btn').click();
+    await page.getByTestId('mute-btn').click();
+    await page.getByRole('heading', { name: 'Desk mode' }).click();
+    await page.keyboard.down('Enter');
+    await checkHeld('Enter', true);
+    await page.keyboard.up('Enter');
+    await checkHeld('Enter', false);
+    assert((await audio()).length === 13, 'Mute preserves key feedback and suppresses both audio phases');
+    await page.getByTestId('desk-close').click();
+    await page.getByTestId('mode-desk-btn').waitFor();
+    await page.reload();
+    await page.getByTestId('mode-desk-btn').click();
+    assert(await pad.inputValue() === '', 'Typing pad contents are not persisted');
+    assert(await page.getByLabel('Switch', { exact: true }).inputValue() === 'clicky', 'Switch persists');
+    assert(await page.getByLabel('Base', { exact: true }).inputValue() === 'aluminum', 'Base persists');
+    assert(await page.getByTestId('mute-btn').getAttribute('aria-pressed') === 'true', 'Mute persists');
+    await page.getByTestId('mute-btn').click();
+    await page.getByTestId('settings-btn').click();
+    assert(await page.getByTestId('volume-slider').inputValue() === '0.37', 'Master volume persists');
+    await page.getByTestId('close-settings-btn').click();
+    await assertNoOverflow(page, label);
+    assert(!errors.length, errors.join('\n'));
+  } finally {
+    await ctx.close();
+  }
+
+  const mobile = await open(browser, mobileOptions(390, 844), `${label}-mobile`);
+  try {
+    assert(!await mobile.page.getByTestId('mode-desk-btn').isVisible(), 'Touch dock keeps enough space for studio actions');
+    await mobile.page.getByTestId('settings-btn').tap();
+    await mobile.page.getByTestId('settings-desk-btn').tap();
+    assert(await mobile.page.getByText('Pair a physical keyboard to play.').isVisible(), 'Touch mode explains the physical keyboard');
+    assert(!await mobile.page.getByLabel('Type here').evaluate((field) => document.activeElement === field), 'Desk entry does not summon the software keyboard');
+    await assertNoOverflow(mobile.page, `${label}-mobile`);
+    await mobile.page.getByTestId('desk-close').tap();
+    await mobile.page.getByTestId('fallback-clicker').waitFor();
+    assert(!mobile.errors.length, mobile.errors.join('\n'));
+  } finally {
+    await mobile.ctx.close();
+  }
+}
+
 // ───────────────────────────────────────── main ─────────────────────────────────────────
 console.log(`Thock Lab E2E · ${ENGINE} · ${BASE_URL} · suites: ${SUITES.join(', ')}`);
 const browser =
@@ -2097,6 +2273,7 @@ try {
     const t0 = Date.now();
     try {
       if (s === 'static') await suiteStatic(browser);
+      else if (s === 'desk') await suiteDesk(browser);
       else if (s === 'geometry') await suiteGeometry(browser);
       else if (s === 'breakpoints') await suiteBreakpoints(browser);
       else if (s === 'round5') await suiteRound5(browser);
@@ -2119,7 +2296,7 @@ try {
       console.log(`  ✓ ${s} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     } catch (err) {
       failed = true;
-      console.log(`  ✗ ${s}: ${err.message}`);
+      console.log(`  ✗ ${s}: ${s === 'desk' ? err.stack : err.message}`);
     } finally {
       for (const ctx of browser.contexts()) await ctx.close();
     }
