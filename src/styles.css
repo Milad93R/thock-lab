@@ -2853,3 +2853,7 @@ input:focus-visible,
     transition: none !important;
   }
 }
+
+/* Related Algoty products */
+.algoty-links { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .35rem .75rem; padding: .5rem .75rem; font-size: .75rem; line-height: 1.5; color: inherit; }
+.algoty-links a { color: inherit; text-decoration: underline; text-underline-offset: .15em; }

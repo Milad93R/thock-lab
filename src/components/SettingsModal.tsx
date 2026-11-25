@@ -202,6 +202,7 @@ export function SettingsModal({
               </>
             )}
           </p>
+          <footer className="algoty-links">More from Algoty: <a href="https://tondnevis.algoty.com/" target="_blank" rel="noopener noreferrer">تندنویس</a> <a href="https://perchy.algoty.com/" target="_blank" rel="noopener noreferrer">Perchy</a></footer>
         </div>
     </ModalShell>
   );

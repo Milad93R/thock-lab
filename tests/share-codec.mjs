@@ -12,10 +12,12 @@ const { outputFiles } = await bundle({
   write: false,
 });
 const {
-  DAILY_VARIANTS, DEFAULT_BUILD, decodeBuildFromHash, encodeBuildToHash, parseShareHash, sanitizeBuild,
+  DAILY_VARIANTS, DEFAULT_BUILD, buildShareUrl, decodeBuildFromHash, encodeBuildToHash, parseShareHash, sanitizeBuild,
 } = await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString('base64')}`);
 
 const valid = encodeBuildToHash(DEFAULT_BUILD);
+assert.equal(buildShareUrl(DEFAULT_BUILD), `https://thock.algoty.com/${valid}`);
+assert.equal(buildShareUrl(DEFAULT_BUILD, "https://thock.algoty.com/?utm_source=example#old"), `https://thock.algoty.com/${valid}`);
 const fields = valid.slice(3).split('.');
 assert.deepEqual(decodeBuildFromHash(valid), DEFAULT_BUILD);
 assert.deepEqual(parseShareHash('#section'), { status: 'none' });

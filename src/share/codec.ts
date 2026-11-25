@@ -171,7 +171,7 @@ export function decodeBuildFromHash(hash: string): ClickerBuild | null {
 }
 
 export function buildShareUrl(build: ClickerBuild, originHref?: string): string {
-  const base = (originHref ?? window.location.href).split('#')[0];
+  const base = (originHref ?? 'https://thock.algoty.com/').split(/[?#]/)[0];
   return `${base}${encodeBuildToHash(build)}`;
 }
 
